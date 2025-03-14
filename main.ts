@@ -1,4 +1,8 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Vault, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import TurndownService from 'turndown';
+import url from 'url';
+import { extractReadable } from './code';
+import { dirname } from 'path';
 
 // Remember to rename these classes and interfaces!
 
@@ -10,6 +14,25 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: 'default'
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function createFolderGracefully(vault: Vault, path: string) {
+	const list: string[] = [];
+
+	let current = path;
+	while (vault.getFolderByPath(current) === null) {
+		list.unshift(current);
+		current = dirname(current);
+		if (current === '.') {
+			break;
+		}
+	}
+
+	for (const p of list) {
+		await vault.createFolder(p);
+	}
+}
+
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
 
@@ -17,9 +40,75 @@ export default class MyPlugin extends Plugin {
 		await this.loadSettings();
 
 		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		const ribbonIconEl = this.addRibbonIcon('dice', 'Get Content from Clipboard Link', async (evt: MouseEvent) => {
+			const readingDir = '0 Reading';
+
+			// Clipboard text
+			const copied = await navigator.clipboard.readText();
+
+			// Download & parse html
+			const html = await requestUrl({
+				method: 'GET',
+				url: copied,
+			});
+
+			const hostname = url.parse(copied).hostname || '';
+			const doc = new DOMParser().parseFromString(html.text, 'text/html');
+			const text = extractReadable({
+				doc,
+				hostname,
+				resultDir: readingDir,
+			});
+			const { readable, title, images } = text;
+
+			// Convert to markdown
+			let turndownService = new TurndownService({
+				codeBlockStyle: 'fenced',
+			});
+			let markdown =
+				turndownService.turndown(readable!)
+					.replace(/\!\$\\\[\\\[/g, '![[')
+					.replace(/\\\]\\\]\$/g, ']]');
+
+			const notePath = `${readingDir}/${title}/${title}.md`;
+
+			await createFolderGracefully(this.app.vault, dirname(notePath));
+			await this.app.vault.create(notePath, markdown);
+			new Notice(`Created ${title}`);
+
+			// Download & save images
+			const imageDir = `${readingDir}/${title}/images`;
+			await createFolderGracefully(this.app.vault, imageDir);
+
+			images.forEach(async imgPath => {
+				const imgUrl = `https://${hostname}/${imgPath}`;
+				let imgData = await requestUrl({
+					method: 'GET',
+					url: imgUrl,
+				});
+
+				let counter = 0;
+				while (imgData.status !== 200) {
+					await sleep(5000);
+					console.log(`Failed to download ${imgUrl}`);
+					imgData = await requestUrl({
+						method: 'GET',
+						url: imgUrl,
+					});
+					counter++;
+
+					if (counter > 3) {
+						new Notice(`Failed to download ${imgUrl}`);
+						break;
+					}
+				}
+
+				await sleep(1000);
+
+				const vaultImgPath = `${imageDir}/${imgPath}`;
+				await createFolderGracefully(this.app.vault, dirname(vaultImgPath));
+				await this.app.vault.createBinary(vaultImgPath, imgData.arrayBuffer);
+			})
 		});
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('my-plugin-ribbon-class');
@@ -97,12 +186,12 @@ class SampleModal extends Modal {
 	}
 
 	onOpen() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.setText('Woah!');
 	}
 
 	onClose() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
 	}
 }
@@ -116,7 +205,7 @@ class SampleSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
